@@ -338,7 +338,9 @@ async function destroyClient(): Promise<void> {
   lastUser = null;
 }
 
-function createAndInitClient(pairWithPhoneNumber?: { phoneNumber: string }) {
+function createAndInitClient(
+  pairWithPhoneNumber?: { phoneNumber: string; showNotification?: boolean; intervalMs?: number }
+) {
   const client = new Client({
     authStrategy: new LocalAuth({
       clientId: "default",
