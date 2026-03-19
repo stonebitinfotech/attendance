@@ -321,123 +321,145 @@ async function getSenderName(
   return fallback;
 }
 
+async function destroyClient(): Promise<void> {
+  const existing = globalState.__attandanceWhatsappClientPromise;
+  if (existing) {
+    try {
+      const client = await existing;
+      await client.destroy();
+    } catch {
+      // ignore
+    }
+  }
+  globalState.__attandanceWhatsappClientPromise = undefined;
+  lastQr = null;
+  lastConnection = "close";
+  connected = false;
+  lastUser = null;
+}
+
+function createAndInitClient(pairWithPhoneNumber?: { phoneNumber: string }) {
+  const client = new Client({
+    authStrategy: new LocalAuth({
+      clientId: "default",
+      dataPath: authDir(),
+    }),
+    puppeteer: {
+      headless: true,
+      args: ["--no-sandbox", "--disable-setuid-sandbox"],
+    },
+    ...(pairWithPhoneNumber && { pairWithPhoneNumber }),
+  });
+
+  client.on("qr", (qr: string) => {
+    lastQr = String(qr);
+    lastConnection = "qr";
+    connected = false;
+  });
+
+  client.on("code", (code: string) => {
+    lastConnection = "pairing";
+    connected = false;
+  });
+
+  client.on("ready", () => {
+    connected = true;
+    lastConnection = "ready";
+    lastQr = null;
+    try {
+      const info = (
+        client as unknown as {
+          info?: {
+            wid?: { user?: string; _serialized?: string };
+            pushname?: string;
+          };
+        }
+      ).info;
+      lastUser = {
+        id: info?.wid?.user ?? info?.wid?._serialized,
+        name: info?.pushname ?? info?.wid?.user,
+      };
+    } catch {
+      // ignore
+    }
+    void refreshTargetGroupIds(client);
+  });
+
+  client.on("authenticated", () => {
+    lastConnection = "authenticated";
+  });
+
+  client.on("auth_failure", () => {
+    connected = false;
+    lastConnection = "auth_failure";
+  });
+
+  client.on("disconnected", () => {
+    connected = false;
+    lastConnection = "disconnected";
+  });
+
+  client.on("message", async (message: Message) => {
+    try {
+      const messageChatId = typeof message.from === "string" ? message.from : "";
+      if (targetGroupIds.size === 0) {
+        await refreshTargetGroupIds(client);
+      }
+      if (!targetGroupIds.has(messageChatId)) return;
+
+      const senderId = getSenderId(message);
+      const senderName = await getSenderName(client, message, senderId);
+      const groupName =
+        targetGroupNames.get(messageChatId) ?? "Group";
+      const fromMe = !!message?.fromMe;
+      const preview = getMessagePreview(message);
+
+      const bodyText = typeof message.body === "string" ? message.body : "";
+      const parsedAttendanceBody = parseAttendanceFromBody(bodyText);
+
+      if (parsedAttendanceBody) {
+        const employees = await refreshEmployeesFromDb();
+        const employee =
+          matchEmployeeFromText(senderName, employees) ??
+          matchEmployeeFromText(bodyText, employees);
+        if (employee) {
+          const ts =
+            typeof message.timestamp === "number"
+              ? message.timestamp
+              : Math.floor(Date.now() / 1000);
+          const date = timestampToISODate(ts);
+          const parsedAttendance: ParsedAttendance = {
+            employee,
+            ...parsedAttendanceBody,
+          };
+
+          await upsertAttendance(parsedAttendance, date);
+
+          console.log(
+            `[Attendance][${date}] ${parsedAttendance.employee} ${parsedAttendance.action.toUpperCase()} ${parsedAttendance.time} (Half${parsedAttendance.half})`
+          );
+        }
+      }
+
+      console.log(
+        `[WhatsApp][${groupName}] ${fromMe ? "sent" : "received"} from ${senderName} (${senderId}): ${preview}`
+      );
+    } catch {
+      // ignore
+    }
+  });
+
+  client.initialize();
+  return client;
+}
+
 async function ensureClient() {
   const existing = globalState.__attandanceWhatsappClientPromise;
   if (existing) return existing;
 
-  globalState.__attandanceWhatsappClientPromise = (async () => {
-    const client = new Client({
-      authStrategy: new LocalAuth({
-        clientId: "default",
-        dataPath: authDir(),
-      }),
-      puppeteer: {
-        headless: true,
-        args: ["--no-sandbox", "--disable-setuid-sandbox"],
-      },
-    });
-
-    client.on("qr", (qr: string) => {
-      lastQr = String(qr);
-      lastConnection = "qr";
-      connected = false;
-    });
-
-    client.on("ready", () => {
-      connected = true;
-      lastConnection = "ready";
-      lastQr = null;
-      try {
-        // `wid` is not always available, so keep it best-effort
-        const info = (
-          client as unknown as {
-            info?: {
-              wid?: { user?: string; _serialized?: string };
-              pushname?: string;
-            };
-          }
-        ).info;
-        lastUser = {
-          id: info?.wid?.user ?? info?.wid?._serialized,
-          name: info?.pushname ?? info?.wid?.user,
-        };
-      } catch {
-        // ignore
-      }
-
-      // Prime group id filter for message logging.
-      void refreshTargetGroupIds(client);
-    });
-
-    client.on("authenticated", () => {
-      lastConnection = "authenticated";
-    });
-
-    client.on("auth_failure", () => {
-      connected = false;
-      lastConnection = "auth_failure";
-    });
-
-    client.on("disconnected", () => {
-      connected = false;
-      lastConnection = "disconnected";
-    });
-
-    client.on("message", async (message: Message) => {
-      try {
-        // Log only messages from the target group(s).
-        const messageChatId = typeof message.from === "string" ? message.from : "";
-        if (targetGroupIds.size === 0) {
-          await refreshTargetGroupIds(client);
-        }
-        if (!targetGroupIds.has(messageChatId)) return;
-
-        const senderId = getSenderId(message);
-        const senderName = await getSenderName(client, message, senderId);
-        const groupName =
-          targetGroupNames.get(messageChatId) ?? "Group";
-        const fromMe = !!message?.fromMe;
-        const preview = getMessagePreview(message);
-
-        const bodyText = typeof message.body === "string" ? message.body : "";
-        const parsedAttendanceBody = parseAttendanceFromBody(bodyText);
-
-        if (parsedAttendanceBody) {
-          const employees = await refreshEmployeesFromDb();
-          const employee =
-            matchEmployeeFromText(senderName, employees) ??
-            matchEmployeeFromText(bodyText, employees);
-          if (employee) {
-            const ts =
-              typeof message.timestamp === "number"
-                ? message.timestamp
-                : Math.floor(Date.now() / 1000);
-            const date = timestampToISODate(ts);
-            const parsedAttendance: ParsedAttendance = {
-              employee,
-              ...parsedAttendanceBody,
-            };
-
-            await upsertAttendance(parsedAttendance, date);
-
-            console.log(
-              `[Attendance][${date}] ${parsedAttendance.employee} ${parsedAttendance.action.toUpperCase()} ${parsedAttendance.time} (Half${parsedAttendance.half})`
-            );
-          }
-        }
-
-        console.log(
-          `[WhatsApp][${groupName}] ${fromMe ? "sent" : "received"} from ${senderName} (${senderId}): ${preview}`
-        );
-      } catch {
-        // Avoid crashing the process on log failures
-      }
-    });
-
-    // Start the session; `qr` / `ready` events will update our state asynchronously.
-    client.initialize();
-    return client;
-  })();
+  globalState.__attandanceWhatsappClientPromise = Promise.resolve(
+    createAndInitClient()
+  );
 
   return globalState.__attandanceWhatsappClientPromise;
 }
@@ -458,6 +480,49 @@ export async function startWhatsApp(): Promise<void> {
 export async function getQrString(): Promise<string | null> {
   await ensureClient();
   return lastQr;
+}
+
+export async function requestPairingCode(
+  phoneNumber: string
+): Promise<{ code: string } | { error: string }> {
+  const digits = phoneNumber.replace(/\D/g, "");
+  if (digits.length < 10) {
+    return { error: "Enter a valid phone number with country code (e.g. 919876543210)" };
+  }
+
+  if (connected) {
+    return { error: "Already connected" };
+  }
+
+  try {
+    await destroyClient();
+  } catch {
+    // ignore
+  }
+
+  return new Promise((resolve) => {
+    const timeout = setTimeout(() => {
+      resolve({ error: "Timed out waiting for pairing code (try again in 30–60 seconds)" });
+    }, 90_000);
+
+    const client = createAndInitClient({
+      phoneNumber: digits,
+      showNotification: true,
+      intervalMs: 180_000,
+    });
+
+    globalState.__attandanceWhatsappClientPromise = Promise.resolve(client);
+
+    client.once("code", (code: string) => {
+      clearTimeout(timeout);
+      resolve({ code });
+    });
+
+    client.once("auth_failure", () => {
+      clearTimeout(timeout);
+      resolve({ error: "Authentication failed" });
+    });
+  });
 }
 
 export async function getGroupByName(
