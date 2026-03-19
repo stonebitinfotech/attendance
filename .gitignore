@@ -17,6 +17,11 @@
 /.next/
 /out/
 
+# whatsapp-web.js local session/cache (DO NOT COMMIT)
+/.wwebjs_auth/
+/.wwebjs_cache/
+/.wauth/
+
 # production
 /build
 
