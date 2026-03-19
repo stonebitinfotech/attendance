@@ -1,6 +1,5 @@
 "use client";
 
-import Image from "next/image";
 import { useEffect, useMemo, useState } from "react";
 
 type QrResp =
@@ -22,8 +21,10 @@ export default function WhatsAppPage() {
   const statusText = useMemo(() => {
     if (connected) return "Connected successfully.";
     if (connection === "connecting") return "Connecting…";
-    return "Not connected. Scan QR from WhatsApp.";
-  }, [connected, connection]);
+    if (connection === "qr" && !qr) return "Loading QR from WhatsApp…";
+    if (connection === "qr") return "Not connected. Scan the QR code.";
+    return "Not connected. Starting WhatsApp client…";
+  }, [connected, connection, qr]);
 
   useEffect(() => {
     let alive = true;
@@ -97,7 +98,8 @@ export default function WhatsAppPage() {
 
           <div className="flex items-center justify-center rounded-xl border border-black/[.08] bg-white p-6 dark:border-white/[.145] dark:bg-black">
             {qr ? (
-              <Image
+              // Use img for data URLs - Next.js Image doesn't support them well
+              <img
                 src={qr}
                 alt="WhatsApp QR Code"
                 width={320}
@@ -105,7 +107,9 @@ export default function WhatsAppPage() {
                 className="h-auto w-[320px] rounded-lg bg-white p-2"
               />
             ) : (
-              <div className="text-sm text-zinc-600 dark:text-zinc-400">Generating QR…</div>
+              <div className="text-sm text-zinc-600 dark:text-zinc-400">
+                {connection === "qr" ? "Rendering QR…" : "Starting WhatsApp (first load can take 30–60 seconds)…"}
+              </div>
             )}
           </div>
         </div>
